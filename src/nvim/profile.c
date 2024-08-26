@@ -865,7 +865,7 @@ static proftime_T g_prev_time;
 /// @param[out] start the current time
 void time_push(proftime_T *rel, proftime_T *start)
 {
-  proftime_T now = profile_start();
+  proftime_T now = profile_start() / 1000;
 
   // subtract the previous time from now, store it in `rel`
   *rel = profile_sub(now, g_prev_time);
@@ -888,11 +888,11 @@ void time_pop(proftime_T tp)
 /// Prints the difference between `then` and `now`.
 ///
 /// the format is "msec.usec".
-static void time_diff(proftime_T then, proftime_T now)
-{
-  proftime_T diff = profile_sub(now, then);
-  fprintf(time_fd, "%07.3lf", (double)diff / 1.0E6);
-}
+// static void time_diff(proftime_T then, proftime_T now)
+// {
+//   proftime_T diff = profile_sub(now, then);
+//   fprintf(time_fd, "%lu", diff);
+// }
 
 /// Initializes the startuptime code.
 ///
@@ -906,12 +906,15 @@ void time_start(const char *message)
     return;
   }
 
+  // Truncate to microseconds so that rounding errors are consistent
+  // (End of time timestamp is always start of next timestamp, never off by one.)
+  proftime_T now = profile_start() / 1000;
   // initialize the global variables
-  g_prev_time = g_start_time = profile_start();
+  g_prev_time = g_start_time = now;
 
-  fprintf(time_fd, "\ntimes in msec\n");
-  fprintf(time_fd, " clock   self+sourced   self:  sourced script\n");
-  fprintf(time_fd, " clock   elapsed:              other lines\n\n");
+  // fprintf(time_fd, "\ntimes in msec\n");
+  // fprintf(time_fd, " clock   self+sourced   self:  sourced script\n");
+  // fprintf(time_fd, " clock   elapsed:              other lines\n\n");
 
   time_msg(message, NULL);
 }
@@ -928,23 +931,43 @@ void time_msg(const char *mesg, const proftime_T *start)
     return;
   }
 
+  // if (start == NULL) {
+  //     // In trace event format files, we don't need an explicit start line.
+  //     // (It's implicit from the first event.)
+  //     return;
+  // }
+
   // print out the difference between `start` (init earlier) and `now`
-  proftime_T now = profile_start();
-  time_diff(g_start_time, now);
+  proftime_T now = profile_start() / 1000;
+  // time_diff(g_start_time, now);
+  const int64_t pid = os_get_pid();
+  const int64_t tid = pid;
 
-  // if `start` was supplied, print the diff between `start` and `now`
-  if (start != NULL) {
-    fprintf(time_fd, "  ");
-    time_diff(*start, now);
-  }
-
-  // print the difference between the global `g_prev_time` and `now`
-  fprintf(time_fd, "  ");
-  time_diff(g_prev_time, now);
-
-  // reset `g_prev_time` and print the message
+  fprintf(time_fd, "{\"name\":\"%s\","
+          "\"ph\":\"X\","
+          "\"ts\":%lu,"
+          "\"dur\":%lu,"
+          "\"pid\":%ld,"
+          "\"tid\":%ld},\n",
+          mesg,
+          now,
+          profile_sub(now, g_prev_time),
+          pid,
+          tid);
   g_prev_time = now;
-  fprintf(time_fd, ": %s\n", mesg);
+
+  // // if `start` was supplied, print the diff between `start` and `now`
+  // if (start != NULL) {
+  //   fprintf(time_fd, "  ");
+  //   time_diff(*start, now);
+  // }
+
+  // // print the difference between the global `g_prev_time` and `now`
+  // fprintf(time_fd, "  ");
+  // time_diff(g_prev_time, now);
+
+  // // reset `g_prev_time` and print the message
+  // fprintf(time_fd, ": %s\n", mesg);
 }
 
 /// Initializes the `time_fd` stream for the --startuptime report.
@@ -959,6 +982,15 @@ void time_init(const char *fname, const char *process_name)
     semsg(_(e_notopen), fname);
     return;
   }
+
+  // Check if the file is empty
+  fseek(time_fd, 0, SEEK_END);
+  if (ftell(time_fd) == 0) {
+    // Want to do this before setting the buffering mode on the file so that
+    // any other processes see the initial `[`
+    fprintf(time_fd, "[\n");
+  }
+
   startuptime_buf = xmalloc(sizeof(char) * (bufsize + 1));
   // The startuptime file is (potentially) written by multiple Nvim processes concurrently. So each
   // report is buffered, and flushed to disk (`time_finish`) once after startup. `_IOFBF` mode
@@ -972,7 +1004,17 @@ void time_init(const char *fname, const char *process_name)
     semsg("time_init: setvbuf failed: %d %s", r, uv_err_name(r));
     return;
   }
-  fprintf(time_fd, "--- Startup times for process: %s ---\n", process_name);
+  // fprintf(time_fd, "--- Startup times for process: %s ---\n", process_name);
+  // TODO(jez) Figure out how to get tid
+  const int64_t pid = os_get_pid();
+  const int64_t tid = pid;
+  fprintf(time_fd, "{"
+          "\"name\":\"process_name\","
+          "\"ph\":\"M\","
+          "\"pid\":%ld,"
+          "\"tid\":%ld,"
+          "\"args\":{\"name\":\"%s\"}},\n",
+          pid, tid, process_name);
 }
 
 /// Flushes the startuptimes to disk for the current process
@@ -982,7 +1024,7 @@ void time_finish(void)
     return;
   }
   assert(startuptime_buf != NULL);
-  TIME_MSG("--- NVIM STARTED ---\n");
+  TIME_MSG("--- NVIM STARTED ---");
 
   // flush buffer to disk
   fclose(time_fd);
